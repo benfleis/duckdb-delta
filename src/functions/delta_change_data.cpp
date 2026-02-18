@@ -1,5 +1,11 @@
 #include "delta_functions.hpp"
 
+#include "delta_kernel_ffi.hpp"
+#include "delta_utils.hpp"
+
+// XXX: kill me
+#include "functions/delta_scan/delta_multi_file_list.hpp"
+
 #include "duckdb/common/helper.hpp"
 #include "duckdb/common/types.hpp"
 #include "duckdb/function/table_function.hpp"
@@ -8,6 +14,7 @@ namespace duckdb {
 
 struct CDFBindData : public TableFunctionData {
 	string path;
+	KernelExternEngine extern_engine;
 	uint32_t bind_n = 42;
 };
 
@@ -23,8 +30,28 @@ static unique_ptr<FunctionData> BindCDF(ClientContext &context, TableFunctionBin
                                         vector<LogicalType> &return_types, vector<string> &names) {
 	auto bind_data = make_uniq<CDFBindData>();
 	bind_data->path = input.inputs[0].GetValue<string>();
-	names.emplace_back("change_type");
+
+	// TODO move this engine out, rely on attach and path derefing
+	auto builder = CreateBuilder(context, bind_data->path);
+	// auto res = ffi::builder_build(builder);
+	ffi::Handle<ffi::SharedExternEngine> eng_ptr;
+	auto res = KernelUtils::TryUnpackResult(ffi::builder_build(builder), eng_ptr);
+	if (res.HasError()) {
+		res.Throw();
+	}
+	bind_data->extern_engine = eng_ptr;
+
+	// TODO: actually visit schema; for now hard code standard metadata ...
+	names.emplace_back("_commit_version");
+	return_types.emplace_back(LogicalType::UBIGINT);
+	names.emplace_back("_commit__commit_timestamp");
+	return_types.emplace_back(LogicalType::TIMESTAMP);
+	names.emplace_back("_change_type");
 	return_types.emplace_back(LogicalType::VARCHAR);
+	// ... and data
+	names.emplace_back("i");
+	return_types.emplace_back(LogicalType::INTEGER);
+
 	return std::move(bind_data);
 }
 

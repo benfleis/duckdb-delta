@@ -175,4 +175,7 @@ struct ScanDataCallBack {
 	ErrorData error;
 };
 
+// XXX: sssshhh nobody will notice this here
+ffi::EngineBuilder *CreateBuilder(ClientContext &context, const string &path);
+
 } // namespace duckdb

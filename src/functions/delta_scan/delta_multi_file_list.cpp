@@ -61,7 +61,8 @@ static string parseFromConnectionString(const string &connectionString, const st
 	return "";
 }
 
-static ffi::EngineBuilder *CreateBuilder(ClientContext &context, const string &path) {
+// XXX: just expose here for now, consider move later
+ffi::EngineBuilder *CreateBuilder(ClientContext &context, const string &path) {
 	ffi::EngineBuilder *builder;
 
 	// For "regular" paths we early out with the default builder config
