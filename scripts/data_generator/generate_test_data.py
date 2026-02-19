@@ -15,6 +15,15 @@ TMP_PATH = '/tmp'
 from delta_rs_generator import *
 from pyspark_generator import *
 
+## simple with CDF
+con = duckdb.connect()
+con.query(f"COPY (SELECT i FROM range(0,10) tbl(i)) TO '{TMP_PATH}/simple_table_with_cdf.parquet'")
+generate_test_data_pyspark(BASE_PATH, 'simple_table_with_cdf', 'simple_table_with_cdf', f'{TMP_PATH}/simple_table_with_cdf.parquet', enable_cdf=True)
+
+# XXX: no commit
+import sys
+sys.exit(0)
+
 ################################################
 ### Simple tables for simple tests
 ################################################

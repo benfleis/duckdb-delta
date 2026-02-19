@@ -9,7 +9,17 @@ import shutil
 import math
 import glob
 
-def generate_test_data_pyspark(base_path, name, current_path, input_path, delete_predicate = False, partition_column = None, mapping_mode = None):
+
+def generate_test_data_pyspark(
+    base_path,
+    name,
+    current_path,
+    input_path,
+    delete_predicate=False,
+    partition_column=None,
+    mapping_mode=None,
+    enable_cdf=False,
+):
     """
     generate_test_data_pyspark generates some test data using pyspark and duckdb
 
@@ -18,23 +28,28 @@ def generate_test_data_pyspark(base_path, name, current_path, input_path, delete
     :return: describe what it returns
     """
 
-    full_path = base_path + '/' + current_path
-    if (os.path.isdir(full_path)):
+    full_path = base_path + "/" + current_path
+    if os.path.isdir(full_path):
         return
 
     try:
         ## SPARK SESSION
-        builder = SparkSession.builder.appName("MyApp") \
-            .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension") \
-            .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog") \
-            .config("spark.driver.memory", "8g") \
-            .config('spark.driver.host','127.0.0.1')
+        builder = (
+            SparkSession.builder.appName("MyApp")
+            .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
+            .config(
+                "spark.sql.catalog.spark_catalog",
+                "org.apache.spark.sql.delta.catalog.DeltaCatalog",
+            )
+            .config("spark.driver.memory", "8g")
+            .config("spark.driver.host", "127.0.0.1")
+        )
 
         spark = configure_spark_with_delta_pip(builder).getOrCreate()
 
         ## CONFIG
-        delta_table_path = base_path + '/' + current_path + '/delta_lake'
-        parquet_reference_path = base_path + '/' + current_path + '/parquet'
+        delta_table_path = base_path + "/" + current_path + "/delta_lake"
+        parquet_reference_path = base_path + "/" + current_path + "/parquet"
 
         ## CREATE DIRS
         os.makedirs(delta_table_path, exist_ok=True)
@@ -43,22 +58,35 @@ def generate_test_data_pyspark(base_path, name, current_path, input_path, delete
         ## DATA GENERATION
         # df = spark.read.parquet(input_path)
         # df.write.format("delta").mode("overwrite").save(delta_table_path)
-        if (partition_column):
-            spark.sql(f"CREATE TABLE test_table_{name} USING delta PARTITIONED BY ({partition_column}) LOCATION '{delta_table_path}' AS SELECT * FROM parquet.`{input_path}`")
-        else:
-            spark.sql(f"CREATE TABLE test_table_{name} USING delta LOCATION '{delta_table_path}' AS SELECT * FROM parquet.`{input_path}`")
 
-        if mapping_mode == 'name' or mapping_mode == 'id':
-            spark.sql(f"ALTER TABLE test_table_{name} SET TBLPROPERTIES ('delta.minReaderVersion' = '3', 'delta.minWriterVersion' = '7', 'delta.columnMapping.mode' = '{mapping_mode}');")
-        elif mapping_mode is None:
-            spark.sql(f"ALTER TABLE test_table_{name} SET TBLPROPERTIES ('delta.minReaderVersion' = '3', 'delta.minWriterVersion' = '7');")
-        else:
+        tbl_props = f"'delta.minReaderVersion' = '3', 'delta.minWriterVersion' = '7', 'delta.enableChangeDataFeed' = {enable_cdf}"
+        if mapping_mode == "name" or mapping_mode == "id":
+            tbl_props += ", 'delta.columnMapping.mode' = '{mapping_mode}'"
+        elif mapping_mode is not None:
             raise f"Unknown mapping mode: {mapping_mode}"
+
+        partition_arg = (
+            f"PARTITIONED BY ({partition_column}) " if partition_column else ""
+        )
+
+        spark.sql(f"""
+            CREATE TABLE test_table_{name} USING delta 
+                {partition_arg}
+                LOCATION '{delta_table_path}'
+                TBLPROPERTIES ({tbl_props})
+                AS SELECT * FROM parquet.`{input_path}` LIMIT 0
+        """)
+
+        spark.sql(f"INSERT INTO test_table_{name} SELECT * FROM parquet.`{input_path}`")
+        spark.sql(f"UPDATE test_table_{name} SET i=i + 1000")
+        spark.sql(f"DELETE FROM test_table_{name} WHERE i % 2 = 0")
 
         ## CREATE
         ## CONFIGURE USAGE OF DELETION VECTORS
-        if (delete_predicate):
-            spark.sql(f"ALTER TABLE test_table_{name} SET TBLPROPERTIES ('delta.enableDeletionVectors' = true);")
+        if delete_predicate:
+            spark.sql(
+                f"ALTER TABLE test_table_{name} SET TBLPROPERTIES ('delta.enableDeletionVectors' = true);"
+            )
 
         ## ADDING DELETES
         deltaTable = DeltaTable.forPath(spark, delta_table_path)
@@ -66,15 +94,18 @@ def generate_test_data_pyspark(base_path, name, current_path, input_path, delete
             deltaTable.delete(delete_predicate)
 
         ## WRITING THE PARQUET FILES
-        df = spark.table(f'test_table_{name}')
-        df.write.parquet(parquet_reference_path, mode='overwrite')
+        df = spark.table(f"test_table_{name}")
+        df.write.parquet(parquet_reference_path, mode="overwrite")
 
     except:
-        if (os.path.isdir(full_path)):
+        if os.path.isdir(full_path):
             shutil.rmtree(full_path)
         raise
 
-def generate_test_data_pyspark_by_queries(base_path, name, current_path, base_query, queries, mapping_mode = None):
+
+def generate_test_data_pyspark_by_queries(
+    base_path, name, current_path, base_query, queries, mapping_mode=None
+):
     """
     schema_evolve_pyspark_deltatable generates some test data using pyspark and duckdb
 
@@ -83,22 +114,27 @@ def generate_test_data_pyspark_by_queries(base_path, name, current_path, base_qu
     :return: describe what it returns
     """
 
-    full_path = base_path + '/' + current_path
-    if (os.path.isdir(full_path)):
+    full_path = base_path + "/" + current_path
+    if os.path.isdir(full_path):
         return
 
     try:
         ## SPARK SESSION
-        builder = SparkSession.builder.appName("MyApp") \
-            .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension") \
-            .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog") \
-            .config("spark.driver.memory", "8g") \
-            .config('spark.driver.host','127.0.0.1')
+        builder = (
+            SparkSession.builder.appName("MyApp")
+            .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
+            .config(
+                "spark.sql.catalog.spark_catalog",
+                "org.apache.spark.sql.delta.catalog.DeltaCatalog",
+            )
+            .config("spark.driver.memory", "8g")
+            .config("spark.driver.host", "127.0.0.1")
+        )
 
         spark = configure_spark_with_delta_pip(builder).getOrCreate()
 
         ## CONFIG
-        delta_table_path = full_path + '/delta_lake'
+        delta_table_path = full_path + "/delta_lake"
 
         ## CREATE DIRS
         os.makedirs(delta_table_path, exist_ok=True)
@@ -107,11 +143,14 @@ def generate_test_data_pyspark_by_queries(base_path, name, current_path, base_qu
         # df = spark.read.parquet(input_path)
         # df.write.format("delta").mode("overwrite").save(delta_table_path)
 
-        if mapping_mode == 'name' or mapping_mode == 'id':
+        if mapping_mode == "name" or mapping_mode == "id":
             spark.sql(
-                f"CREATE TABLE {name} USING delta TBLPROPERTIES ('delta.minReaderVersion' = '2', 'delta.minWriterVersion' = '5', 'delta.columnMapping.mode' = '{mapping_mode}', 'delta.enableTypeWidening' = 'true') LOCATION '{delta_table_path}' AS {base_query};")
+                f"CREATE TABLE {name} USING delta TBLPROPERTIES ('delta.minReaderVersion' = '2', 'delta.minWriterVersion' = '5', 'delta.columnMapping.mode' = '{mapping_mode}', 'delta.enableTypeWidening' = 'true') LOCATION '{delta_table_path}' AS {base_query};"
+            )
         elif mapping_mode is None:
-            spark.sql(f"CREATE TABLE {name} USING delta TBLPROPERTIES ('delta.minReaderVersion' = '2', 'delta.minWriterVersion' = '5', 'delta.enableTypeWidening' = 'true') LOCATION '{delta_table_path}' AS {base_query};")
+            spark.sql(
+                f"CREATE TABLE {name} USING delta TBLPROPERTIES ('delta.minReaderVersion' = '2', 'delta.minWriterVersion' = '5', 'delta.enableTypeWidening' = 'true') LOCATION '{delta_table_path}' AS {base_query};"
+            )
         else:
             raise f"Unknown mapping mode: {mapping_mode}"
 
@@ -119,7 +158,7 @@ def generate_test_data_pyspark_by_queries(base_path, name, current_path, base_qu
             spark.sql(query)
 
     except:
-        if (os.path.isdir(full_path)):
+        if os.path.isdir(full_path):
             shutil.rmtree(full_path)
         raise
 
