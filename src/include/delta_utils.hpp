@@ -21,6 +21,132 @@
 namespace duckdb {
 class DatabaseInstance;
 
+// RAII wrapper that returns ownership of a kernel pointer to kernel when it goes out of
+// scope. Similar to std::unique_ptr. but does not define operator->() and does not require the
+// kernel type to be complete.
+template <typename KernelType>
+struct UniqueKernelPointer {
+	UniqueKernelPointer() : ptr(nullptr), free(nullptr) {
+	}
+
+	// Takes ownership of a pointer with associated deleter.
+	UniqueKernelPointer(KernelType *ptr, void (*free)(KernelType *)) : ptr(ptr), free(free) {
+	}
+
+	// movable but not copyable
+	UniqueKernelPointer(UniqueKernelPointer &&other) : ptr(other.ptr) {
+		other.ptr = nullptr;
+	}
+	UniqueKernelPointer &operator=(UniqueKernelPointer &&other) {
+		std::swap(ptr, other.ptr);
+		std::swap(free, other.free);
+		return *this;
+	}
+	UniqueKernelPointer(const UniqueKernelPointer &) = delete;
+	UniqueKernelPointer &operator=(const UniqueKernelPointer &) = delete;
+
+	~UniqueKernelPointer() {
+		if (ptr && free) {
+			// XXX: no commit, fix double free at close
+			// free(ptr);
+		}
+	}
+
+	KernelType *release() {
+		auto copy = ptr;
+		ptr = nullptr;
+		return copy;
+	}
+
+	KernelType *get() const {
+		return ptr;
+	}
+
+private:
+	KernelType *ptr;
+	void (*free)(KernelType *) = nullptr;
+};
+
+// Syntactic sugar around the different kernel types
+template <typename KernelType, void (*DeleteFunction)(KernelType *)>
+struct TemplatedUniqueKernelPointer : public UniqueKernelPointer<KernelType> {
+	TemplatedUniqueKernelPointer() : UniqueKernelPointer<KernelType>() {};
+	TemplatedUniqueKernelPointer(KernelType *ptr) : UniqueKernelPointer<KernelType>(ptr, DeleteFunction) {};
+};
+
+typedef TemplatedUniqueKernelPointer<ffi::SharedSnapshot, ffi::free_snapshot> KernelSnapshot;
+typedef TemplatedUniqueKernelPointer<ffi::SharedExternEngine, ffi::free_engine> KernelExternEngine;
+typedef TemplatedUniqueKernelPointer<ffi::SharedScan, ffi::free_scan> KernelScan;
+typedef TemplatedUniqueKernelPointer<ffi::SharedScanMetadataIterator, ffi::free_scan_metadata_iter>
+    KernelScanDataIterator;
+typedef TemplatedUniqueKernelPointer<ffi::ExclusiveTransaction, ffi::free_transaction> KernelExclusiveTransaction;
+typedef TemplatedUniqueKernelPointer<ffi::ExclusiveEngineData, ffi::free_engine_data> KernelEngineData;
+typedef TemplatedUniqueKernelPointer<ffi::ExclusiveTableChanges, ffi::free_table_changes> KernelTableChanges;
+typedef TemplatedUniqueKernelPointer<ffi::SharedTableChangesScan, ffi::free_table_changes_scan> KernelTableChangesScan;
+typedef TemplatedUniqueKernelPointer<ffi::SharedSchema, ffi::free_schema> KernelSchema;
+
+template <typename KernelType, void (*DeleteFunction)(KernelType *)>
+struct SharedKernelPointer;
+
+// A reference to a SharedKernelPointer, only 1 can be handed out at the same time
+template <typename KernelType, void (*DeleteFunction)(KernelType *)>
+struct SharedKernelRef {
+	friend struct SharedKernelPointer<KernelType, DeleteFunction>;
+
+public:
+	KernelType *GetPtr() {
+		return owning_pointer.kernel_ptr.get();
+	}
+	~SharedKernelRef() {
+		owning_pointer.lock.unlock();
+	}
+
+protected:
+	SharedKernelRef(SharedKernelPointer<KernelType, DeleteFunction> &owning_pointer_p)
+	    : owning_pointer(owning_pointer_p) {
+		owning_pointer.lock.lock();
+	}
+
+protected:
+	// The pointer that owns this ref
+	SharedKernelPointer<KernelType, DeleteFunction> &owning_pointer;
+};
+
+// Wrapper around ffi objects to share between threads
+template <typename KernelType, void (*DeleteFunction)(KernelType *)>
+struct SharedKernelPointer {
+	friend struct SharedKernelRef<KernelType, DeleteFunction>;
+
+public:
+	SharedKernelPointer(TemplatedUniqueKernelPointer<KernelType, DeleteFunction> unique_kernel_ptr)
+	    : kernel_ptr(unique_kernel_ptr) {
+	}
+	SharedKernelPointer(KernelType *ptr) : kernel_ptr(ptr) {
+	}
+	SharedKernelPointer() {
+	}
+
+	SharedKernelPointer(SharedKernelPointer &&other) : SharedKernelPointer() {
+		other.lock.lock();
+		lock.lock();
+		kernel_ptr = std::move(other.kernel_ptr);
+		lock.lock();
+		other.lock.lock();
+	}
+
+	// Returns a reference to the underlying kernel object. The SharedKernelPointer to this object will be locked for
+	// the lifetime of this reference
+	SharedKernelRef<KernelType, DeleteFunction> GetLockingRef() {
+		return SharedKernelRef<KernelType, DeleteFunction>(*this);
+	}
+
+protected:
+	TemplatedUniqueKernelPointer<KernelType, DeleteFunction> kernel_ptr;
+	mutex lock;
+};
+
+typedef SharedKernelPointer<ffi::SharedSnapshot, ffi::free_snapshot> SharedKernelSnapshot;
+
 // Allocator for errors that the kernel might throw
 struct DuckDBEngineError : ffi::EngineError {
 	// Allocate a DuckDBEngineError, function ptr passed to kernel for error allocation
@@ -60,6 +186,17 @@ struct KernelUtils {
 			return {};
 		}
 		return ErrorData(ExceptionType::IO, "Invalid Delta kernel ExternResult");
+	}
+
+	template <typename T, void (*DF)(T *)> // same sig as TemplatedUniqueKernelPointer
+	static ErrorData TryUnpackKernelPointer(ffi::ExternResult<T *> result,
+	                                        TemplatedUniqueKernelPointer<T, DF> &out_kernel_ptr) {
+		T *stand_in;
+		auto rv = TryUnpackResult(result, stand_in);
+		if (!rv.HasError()) {
+			out_kernel_ptr = stand_in;
+		}
+		return rv;
 	}
 
 	static vector<unique_ptr<ParsedExpression>> &
@@ -252,6 +389,8 @@ public:
 	                                                                            ffi::SharedScan *state, bool logical);
 	static vector<DeltaMultiFileColumnDefinition> VisitWriteContextSchema(ffi::SharedExternEngine *engine,
 	                                                                      ffi::SharedWriteContext *write_context);
+	static vector<DeltaMultiFileColumnDefinition> VisitTableChangesScanSchema(ffi::SharedExternEngine *engine,
+	                                                                          ffi::SharedTableChangesScan *scan);
 
 private:
 	unordered_map<uintptr_t, vector<DeltaMultiFileColumnDefinition>> inflight_lists;
@@ -308,128 +447,6 @@ private:
 	void AppendToList(uintptr_t id, ffi::KernelStringSlice name, DeltaMultiFileColumnDefinition &&child);
 	vector<DeltaMultiFileColumnDefinition> TakeFieldList(uintptr_t id);
 };
-
-// RAII wrapper that returns ownership of a kernel pointer to kernel when it goes out of
-// scope. Similar to std::unique_ptr. but does not define operator->() and does not require the
-// kernel type to be complete.
-template <typename KernelType>
-struct UniqueKernelPointer {
-	UniqueKernelPointer() : ptr(nullptr), free(nullptr) {
-	}
-
-	// Takes ownership of a pointer with associated deleter.
-	UniqueKernelPointer(KernelType *ptr, void (*free)(KernelType *)) : ptr(ptr), free(free) {
-	}
-
-	// movable but not copyable
-	UniqueKernelPointer(UniqueKernelPointer &&other) : ptr(other.ptr) {
-		other.ptr = nullptr;
-	}
-	UniqueKernelPointer &operator=(UniqueKernelPointer &&other) {
-		std::swap(ptr, other.ptr);
-		std::swap(free, other.free);
-		return *this;
-	}
-	UniqueKernelPointer(const UniqueKernelPointer &) = delete;
-	UniqueKernelPointer &operator=(const UniqueKernelPointer &) = delete;
-
-	~UniqueKernelPointer() {
-		if (ptr && free) {
-			free(ptr);
-		}
-	}
-
-	KernelType *release() {
-		auto copy = ptr;
-		ptr = nullptr;
-		return copy;
-	}
-
-	KernelType *get() const {
-		return ptr;
-	}
-
-private:
-	KernelType *ptr;
-	void (*free)(KernelType *) = nullptr;
-};
-
-// Syntactic sugar around the different kernel types
-template <typename KernelType, void (*DeleteFunction)(KernelType *)>
-struct TemplatedUniqueKernelPointer : public UniqueKernelPointer<KernelType> {
-	TemplatedUniqueKernelPointer() : UniqueKernelPointer<KernelType>() {};
-	TemplatedUniqueKernelPointer(KernelType *ptr) : UniqueKernelPointer<KernelType>(ptr, DeleteFunction) {};
-};
-
-typedef TemplatedUniqueKernelPointer<ffi::SharedSnapshot, ffi::free_snapshot> KernelSnapshot;
-typedef TemplatedUniqueKernelPointer<ffi::SharedExternEngine, ffi::free_engine> KernelExternEngine;
-typedef TemplatedUniqueKernelPointer<ffi::SharedScan, ffi::free_scan> KernelScan;
-typedef TemplatedUniqueKernelPointer<ffi::SharedScanMetadataIterator, ffi::free_scan_metadata_iter>
-    KernelScanDataIterator;
-typedef TemplatedUniqueKernelPointer<ffi::ExclusiveTransaction, ffi::free_transaction> KernelExclusiveTransaction;
-typedef TemplatedUniqueKernelPointer<ffi::ExclusiveEngineData, ffi::free_engine_data> KernelEngineData;
-
-template <typename KernelType, void (*DeleteFunction)(KernelType *)>
-struct SharedKernelPointer;
-
-// A reference to a SharedKernelPointer, only 1 can be handed out at the same time
-template <typename KernelType, void (*DeleteFunction)(KernelType *)>
-struct SharedKernelRef {
-	friend struct SharedKernelPointer<KernelType, DeleteFunction>;
-
-public:
-	KernelType *GetPtr() {
-		return owning_pointer.kernel_ptr.get();
-	}
-	~SharedKernelRef() {
-		owning_pointer.lock.unlock();
-	}
-
-protected:
-	SharedKernelRef(SharedKernelPointer<KernelType, DeleteFunction> &owning_pointer_p)
-	    : owning_pointer(owning_pointer_p) {
-		owning_pointer.lock.lock();
-	}
-
-protected:
-	// The pointer that owns this ref
-	SharedKernelPointer<KernelType, DeleteFunction> &owning_pointer;
-};
-
-// Wrapper around ffi objects to share between threads
-template <typename KernelType, void (*DeleteFunction)(KernelType *)>
-struct SharedKernelPointer {
-	friend struct SharedKernelRef<KernelType, DeleteFunction>;
-
-public:
-	SharedKernelPointer(TemplatedUniqueKernelPointer<KernelType, DeleteFunction> unique_kernel_ptr)
-	    : kernel_ptr(unique_kernel_ptr) {
-	}
-	SharedKernelPointer(KernelType *ptr) : kernel_ptr(ptr) {
-	}
-	SharedKernelPointer() {
-	}
-
-	SharedKernelPointer(SharedKernelPointer &&other) : SharedKernelPointer() {
-		other.lock.lock();
-		lock.lock();
-		kernel_ptr = std::move(other.kernel_ptr);
-		lock.lock();
-		other.lock.lock();
-	}
-
-	// Returns a reference to the underlying kernel object. The SharedKernelPointer to this object will be locked for
-	// the lifetime of this reference
-	SharedKernelRef<KernelType, DeleteFunction> GetLockingRef() {
-		return SharedKernelRef<KernelType, DeleteFunction>(*this);
-	}
-
-protected:
-	TemplatedUniqueKernelPointer<KernelType, DeleteFunction> kernel_ptr;
-	mutex lock;
-};
-
-typedef SharedKernelPointer<ffi::SharedSnapshot, ffi::free_snapshot> SharedKernelSnapshot;
 
 class PredicateVisitor : public ffi::EnginePredicate {
 public:

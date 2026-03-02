@@ -19,6 +19,7 @@ def generate_test_data_pyspark(
     partition_column=None,
     mapping_mode=None,
     enable_cdf=False,
+    update_exprs=None,  # (cond, set) a la ('x % 3 = 0', {'x', 'x + 1000'}); runs ater delete
 ):
     """
     generate_test_data_pyspark generates some test data using pyspark and duckdb
@@ -92,6 +93,10 @@ def generate_test_data_pyspark(
         deltaTable = DeltaTable.forPath(spark, delta_table_path)
         if delete_predicate:
             deltaTable.delete(delete_predicate)
+
+        if update_exprs:
+            cond_expr, set_expr = update_exprs
+            deltaTable.update(cond_expr, set_expr)
 
         ## WRITING THE PARQUET FILES
         df = spark.table(f"test_table_{name}")

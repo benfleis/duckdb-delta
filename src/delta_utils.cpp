@@ -611,6 +611,23 @@ SchemaVisitor::VisitSnapshotGlobalReadSchema(ffi::SharedExternEngine *engine, ff
 	return visitor_state.TakeFieldList(result);
 }
 
+vector<DeltaMultiFileColumnDefinition> SchemaVisitor::VisitTableChangesScanSchema(ffi::SharedExternEngine *engine,
+                                                                                  ffi::SharedTableChangesScan *scan) {
+	SchemaVisitor visitor_state;
+	visitor_state.engine = engine;
+	auto visitor = CreateSchemaVisitor(visitor_state);
+
+	ffi::Handle<ffi::SharedSchema> schema = ffi::table_changes_scan_logical_schema(scan);
+	uintptr_t result = visit_schema(schema, &visitor);
+	free_schema(schema);
+
+	if (visitor_state.error.HasError()) {
+		visitor_state.error.Throw();
+	}
+
+	return visitor_state.TakeFieldList(result);
+}
+
 vector<DeltaMultiFileColumnDefinition> SchemaVisitor::VisitWriteContextSchema(ffi::SharedExternEngine *engine,
                                                                               ffi::SharedWriteContext *write_context) {
 	SchemaVisitor visitor_state;
