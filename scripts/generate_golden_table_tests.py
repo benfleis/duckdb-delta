@@ -46,6 +46,34 @@ from delta_scan('${{GOLDEN_TABLES_PATH}}/{test_name}/delta')
 IO Error: DeltaKernel
 
 """
+
+
+def generate_checkpoint_test(test_name):
+    # let version = snapshot.version();
+    # let scan = snapshot.scan_builder().build().expect("build the scan");
+    # let scan_metadata: Vec<_> = scan
+    #    .scan_metadata(&engine)
+    #    .expect("scan metadata")
+    #    .collect();
+    # assert_eq!(version, 14);
+    # assert!(scan_metadata.len() == 1);
+    # Ok(())
+
+    print(f"generating checkpoint test: {test_name}")
+    return f"""
+######## {test_name} ########
+
+statement ok
+from delta_scan('${{GOLDEN_TABLES_PATH}}/{test_name}/delta')
+
+query I
+SELECT version FROM delta_get_transaction_version('delta_table', 'my_app_id');
+----
+14
+
+"""
+
+
 def write_base_tests():
     name = "generated"
     file_name = "generated.test"
