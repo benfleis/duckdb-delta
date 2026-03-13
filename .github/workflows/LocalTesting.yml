@@ -146,7 +146,6 @@ jobs:
     runs-on: ubuntu-latest
     env:
       BUILD_BENCHMARK: 1
-    if: false # FIXME: @benfleis - disabling to unblock v1.5 progress - https://github.com/duckdblabs/duckdb-internal/issues/7233
 
     steps:
       - *checkout
