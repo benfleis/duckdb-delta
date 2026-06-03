@@ -112,6 +112,12 @@ TableFunctionSet DeltaFunctions::GetDeltaScanFunction(ExtensionLoader &loader) {
 		function.named_parameters["pushdown_partition_info"] = LogicalType::BOOLEAN;
 		function.named_parameters["pushdown_filters"] = LogicalType::VARCHAR;
 		function.named_parameters["log_tail"] = KernelUtils::GetLogPathType();
+		function.named_parameters["scan_plan_context"] = LogicalType::UBIGINT;
+		function.named_parameters["scan_plan_col_names"] = LogicalType::LIST(LogicalType::VARCHAR);
+		function.named_parameters["scan_plan_col_types"] = LogicalType::LIST(LogicalType::VARCHAR);
+		function.named_parameters["scan_plan_inline_files"] = LogicalType::LIST(LogicalType::VARCHAR);
+		function.named_parameters["scan_plan_catalog_name"] = LogicalType::VARCHAR;
+		function.named_parameters["scan_plan_schema_name"] = LogicalType::VARCHAR;
 
 		function.name = "delta_scan";
 	}

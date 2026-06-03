@@ -163,6 +163,22 @@ protected:
 	// The schema containing the proper column identifiers, lazily loaded to avoid prematurely initializing the kernel
 	// scan
 	mutable vector<DeltaMultiFileColumnDefinition> lazy_loaded_schema;
+
+	// Scan-plan IPC mode (UC sets this; 0 = normal Delta kernel path)
+	mutable uint64_t scan_plan_context_ptr = 0;
+	// IPC function pointer resolved at InitScanPlanMode time (main thread).
+	// nullptr => __internal_uc_scan_plan_fetch_tasks not found; stop early.
+	mutable table_function_t scan_plan_fetch_fn = nullptr;
+	// UC catalog/schema names used to look up the IPC function.
+	mutable string scan_plan_catalog_name;
+	mutable string scan_plan_schema_name;
+
+public:
+	// Pre-initialise from scan-plan API results (bypasses Delta kernel entirely).
+	// col_names/col_types: full table schema; inline_paths: pre-resolved FileScanTask paths.
+	void InitScanPlanMode(uint64_t ctx_ptr, const string &catalog_name, const string &schema_name,
+	                      const vector<string> &col_names, const vector<LogicalType> &col_types,
+	                      const vector<string> &inline_paths);
 };
 
 // Callback for the ffi::kernel_scan_data_next callback

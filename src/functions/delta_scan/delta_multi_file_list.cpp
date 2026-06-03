@@ -2,6 +2,11 @@
 #include "functions/delta_scan/delta_multi_file_list.hpp"
 #include "functions/delta_scan/delta_multi_file_reader.hpp"
 
+#include "duckdb/catalog/catalog_entry/table_function_catalog_entry.hpp"
+#include "duckdb/catalog/catalog_entry_retriever.hpp"
+#include "duckdb/common/types/data_chunk.hpp"
+#include "duckdb/parser/expression/constant_expression.hpp"
+
 #include "duckdb/common/local_file_system.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/client_data.hpp"
@@ -638,7 +643,101 @@ void DeltaMultiFileList::Bind(vector<LogicalType> &return_types, vector<string> 
 	this->global_columns = std::move(visited_schema);
 }
 
+void DeltaMultiFileList::InitScanPlanMode(uint64_t ctx_ptr, const string &catalog_name, const string &schema_name,
+                                          const vector<string> &col_names, const vector<LogicalType> &col_types,
+                                          const vector<string> &inline_paths) {
+	scan_plan_context_ptr = ctx_ptr;
+	scan_plan_catalog_name = catalog_name;
+	scan_plan_schema_name = schema_name;
+	for (idx_t i = 0; i < col_names.size(); i++) {
+		DeltaMultiFileColumnDefinition col(col_names[i], col_types[i], /*nullable=*/true);
+		col.default_expression = make_uniq<ConstantExpression>(Value(col_types[i]));
+		global_columns.push_back(col);
+		lazy_loaded_schema.push_back(std::move(col));
+	}
+	have_bound = true;
+	initialized_snapshot = true;
+	initialized_scan = true;
+	files_exhausted = false;
+	for (auto &path : inline_paths) {
+		resolved_files.push_back(OpenFileInfo(path));
+		metadata.push_back(make_uniq<DeltaFileMetaData>());
+	}
+
+	// Resolve the IPC function NOW on the main thread (safe for catalog access).
+	// Worker threads must not call into the catalog; they use scan_plan_fetch_fn directly.
+	if (ctx_ptr != 0) {
+		auto ctx = client_ctx.lock();
+		if (ctx) {
+			CatalogEntryRetriever retriever(*ctx);
+			string fn_name = "__internal_uc_scan_plan_fetch_tasks";
+			EntryLookupInfo li(CatalogType::TABLE_FUNCTION_ENTRY, fn_name);
+			string lookup_schema = scan_plan_schema_name.empty() ? DEFAULT_SCHEMA : scan_plan_schema_name;
+			auto fn = retriever.GetEntry(scan_plan_catalog_name, lookup_schema, li, OnEntryNotFound::RETURN_NULL);
+			if (fn) {
+				auto tf = fn->Cast<TableFunctionCatalogEntry>().functions.GetFunctionByArguments(
+				    *ctx, {LogicalType::POINTER});
+				scan_plan_fetch_fn = tf.function;
+			}
+		}
+	}
+}
+
 OpenFileInfo DeltaMultiFileList::GetFileInternal(idx_t i) const {
+	// Scan-plan IPC path: no Delta kernel involved.
+	if (scan_plan_context_ptr != 0) {
+		if (i < resolved_files.size()) {
+			return resolved_files[i];
+		}
+		if (files_exhausted) {
+			return OpenFileInfo();
+		}
+		if (!scan_plan_fetch_fn) {
+			// IPC function not found (UC extension not loaded or name changed).
+			files_exhausted = true;
+			return OpenFileInfo();
+		}
+
+		auto ctx = client_ctx.lock();
+		if (!ctx) {
+			files_exhausted = true;
+			return OpenFileInfo();
+		}
+
+		// Call the IPC function via DataChunk protocol.
+		// col 0 = input POINTER; col 1 = output LIST(VARCHAR)
+		DataChunk chunk;
+		chunk.Initialize(Allocator::DefaultAllocator(),
+		                 {LogicalType::POINTER, LogicalType::LIST(LogicalType::VARCHAR)});
+		chunk.SetCardinality(1);
+		chunk.SetValue(0, 0, Value::POINTER(scan_plan_context_ptr));
+		TableFunctionInput tfi(nullptr, nullptr, nullptr);
+		scan_plan_fetch_fn(*ctx, tfi, chunk);
+
+		auto list_val = chunk.GetValue(1, 0);
+		if (list_val.IsNull()) {
+			files_exhausted = true;
+			return OpenFileInfo();
+		}
+		auto &children = ListValue::GetChildren(list_val);
+		if (children.empty()) {
+			files_exhausted = true;
+			return OpenFileInfo();
+		}
+		for (auto &pv : children) {
+			auto path = pv.ToString();
+			resolved_files.push_back(OpenFileInfo(path));
+			metadata.push_back(make_uniq<DeltaFileMetaData>());
+		}
+
+		if (i < resolved_files.size()) {
+			return resolved_files[i];
+		}
+		files_exhausted = true;
+		return OpenFileInfo();
+	}
+
+	// Normal Delta kernel path.
 	EnsureScanInitialized();
 
 	// We already have this file
@@ -857,6 +956,11 @@ unique_ptr<MultiFileList> DeltaMultiFileList::ComplexFilterPushdown(ClientContex
                                                                     const MultiFileOptions &options,
                                                                     MultiFilePushdownInfo &info,
                                                                     vector<unique_ptr<Expression>> &filters) const {
+	// In scan-plan mode the server already applied the filter; skip kernel-based pushdown.
+	if (scan_plan_context_ptr != 0) {
+		return nullptr;
+	}
+
 	auto pushdown_mode = GetDeltaFilterPushdownMode(context, options);
 	if (pushdown_mode == DeltaFilterPushdownMode::NONE || pushdown_mode == DeltaFilterPushdownMode::DYNAMIC_ONLY) {
 		return nullptr;
@@ -990,6 +1094,9 @@ unique_ptr<MultiFileList>
 DeltaMultiFileList::DynamicFilterPushdown(ClientContext &context, const MultiFileOptions &options,
                                           const vector<string> &names, const vector<LogicalType> &types,
                                           const vector<column_t> &column_ids, TableFilterSet &filters) const {
+	if (scan_plan_context_ptr != 0) {
+		return nullptr;
+	}
 	auto pushdown_mode = GetDeltaFilterPushdownMode(context, options);
 	if (pushdown_mode == DeltaFilterPushdownMode::NONE || pushdown_mode == DeltaFilterPushdownMode::CONSTANT_ONLY) {
 		return nullptr;

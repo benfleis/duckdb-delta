@@ -103,6 +103,29 @@ void FinalizeBindBaseOverride(MultiFileReaderData &reader_data, const MultiFileO
 	}
 }
 
+// Map UC-style type strings (LogicalType::ToString() output) to LogicalType.
+// Unrecognised types fall back to VARCHAR.
+static LogicalType ScanPlanTypeFromString(const string &s) {
+	auto u = StringUtil::Upper(s);
+	if (u == "INTEGER" || u == "INT4" || u == "INT" || u == "SIGNED")  return LogicalType::INTEGER;
+	if (u == "BIGINT" || u == "INT8" || u == "LONG")                   return LogicalType::BIGINT;
+	if (u == "SMALLINT" || u == "INT2")                                return LogicalType::SMALLINT;
+	if (u == "TINYINT" || u == "INT1")                                 return LogicalType::TINYINT;
+	if (u == "UBIGINT")                                                return LogicalType::UBIGINT;
+	if (u == "UINTEGER")                                               return LogicalType::UINTEGER;
+	if (u == "USMALLINT")                                              return LogicalType::USMALLINT;
+	if (u == "UTINYINT")                                               return LogicalType::UTINYINT;
+	if (u == "HUGEINT")                                                return LogicalType::HUGEINT;
+	if (u == "VARCHAR" || u == "TEXT" || u == "STRING" || u == "CHAR" || u == "BPCHAR") return LogicalType::VARCHAR;
+	if (u == "DOUBLE" || u == "FLOAT8")                                return LogicalType::DOUBLE;
+	if (u == "FLOAT" || u == "FLOAT4" || u == "REAL")                  return LogicalType::FLOAT;
+	if (u == "BOOLEAN" || u == "BOOL" || u == "LOGICAL")               return LogicalType::BOOLEAN;
+	if (u == "TIMESTAMP" || u == "TIMESTAMP WITH TIME ZONE" || u == "TIMESTAMPTZ") return LogicalType::TIMESTAMP;
+	if (u == "DATE")                                                   return LogicalType::DATE;
+	if (u == "BLOB" || u == "BYTEA" || u == "BINARY" || u == "VARBINARY") return LogicalType::BLOB;
+	return LogicalType::VARCHAR;
+}
+
 bool DeltaMultiFileReader::Bind(MultiFileOptions &options, MultiFileList &files, vector<LogicalType> &return_types,
                                 vector<string> &names, MultiFileReaderBindData &bind_data) {
 	auto &delta_snapshot = dynamic_cast<DeltaMultiFileList &>(files);
@@ -110,6 +133,52 @@ bool DeltaMultiFileReader::Bind(MultiFileOptions &options, MultiFileList &files,
 	auto log_tail_setting = options.custom_options.find("log_tail");
 	if (log_tail_setting != options.custom_options.end()) {
 		delta_snapshot.delta_log_path = make_uniq<DeltaLogPathArray>(log_tail_setting->second);
+	}
+
+	// Scan-plan IPC mode: schema + files come from UC, not the Delta kernel.
+	auto sp_ctx_it = options.custom_options.find("scan_plan_context");
+	if (sp_ctx_it != options.custom_options.end()) {
+		auto ctx_ptr = sp_ctx_it->second.GetValue<uint64_t>();
+
+		vector<string> col_names;
+		auto names_it = options.custom_options.find("scan_plan_col_names");
+		if (names_it != options.custom_options.end()) {
+			for (auto &v : ListValue::GetChildren(names_it->second)) {
+				col_names.push_back(v.ToString());
+			}
+		}
+
+		vector<LogicalType> col_types;
+		auto types_it = options.custom_options.find("scan_plan_col_types");
+		if (types_it != options.custom_options.end()) {
+			for (auto &v : ListValue::GetChildren(types_it->second)) {
+				col_types.push_back(ScanPlanTypeFromString(v.ToString()));
+			}
+		}
+
+		vector<string> inline_paths;
+		auto files_it = options.custom_options.find("scan_plan_inline_files");
+		if (files_it != options.custom_options.end()) {
+			for (auto &v : ListValue::GetChildren(files_it->second)) {
+				inline_paths.push_back(v.ToString());
+			}
+		}
+
+		string catalog_name, schema_name;
+		auto cat_it = options.custom_options.find("scan_plan_catalog_name");
+		if (cat_it != options.custom_options.end()) {
+			catalog_name = cat_it->second.ToString();
+		}
+		auto sch_it = options.custom_options.find("scan_plan_schema_name");
+		if (sch_it != options.custom_options.end()) {
+			schema_name = sch_it->second.ToString();
+		}
+
+		delta_snapshot.InitScanPlanMode(ctx_ptr, catalog_name, schema_name, col_names, col_types, inline_paths);
+
+		return_types = col_types;
+		names = col_names;
+		return true;
 	}
 
 	delta_snapshot.Bind(return_types, names);
@@ -302,6 +371,13 @@ bool DeltaMultiFileReader::ParseOption(const string &key, const Value &val, Mult
 	// We need to capture this one to know whether to emit
 	if (loption == "pushdown_filters") {
 		options.custom_options["pushdown_filters"] = val;
+		return true;
+	}
+
+	if (loption == "scan_plan_context" || loption == "scan_plan_col_names" || loption == "scan_plan_col_types" ||
+	    loption == "scan_plan_inline_files" || loption == "scan_plan_catalog_name" ||
+	    loption == "scan_plan_schema_name") {
+		options.custom_options[loption] = val;
 		return true;
 	}
 
