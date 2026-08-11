@@ -284,8 +284,8 @@ public:
 
 	static vector<DeltaMultiFileColumnDefinition> ToColumnDefinitions(ffi::Handle<ffi::SharedExternEngine> engine,
 	                                                                  ffi::SharedSnapshot *snapshot);
-	static vector<DeltaMultiFileColumnDefinition>
-	ToColumnDefinitions(ffi::Handle<ffi::SharedExternEngine> engine, ffi::SharedScan *state, bool logical);
+	static vector<DeltaMultiFileColumnDefinition> ToColumnDefinitions(ffi::Handle<ffi::SharedExternEngine> engine,
+	                                                                  ffi::SharedScan *state, bool logical);
 	static vector<DeltaMultiFileColumnDefinition> ToColumnDefinitions(ffi::Handle<ffi::SharedExternEngine> engine,
 	                                                                  ffi::SharedWriteContext *write_context);
 
@@ -334,8 +334,8 @@ private:
 	                        bool is_nullable, const ffi::CStringMap *metadata, uintptr_t child_list_id);
 	static void VisitArray(KernelSchemaVisitor *state, uintptr_t sibling_list_id, ffi::KernelStringSlice name,
 	                       bool is_nullable, const ffi::CStringMap *metadata, uintptr_t child_list_id);
-	static void VisitMap(KernelSchemaVisitor *state, uintptr_t sibling_list_id, ffi::KernelStringSlice name, bool is_nullable,
-	                     const ffi::CStringMap *metadata, uintptr_t child_list_id);
+	static void VisitMap(KernelSchemaVisitor *state, uintptr_t sibling_list_id, ffi::KernelStringSlice name,
+	                     bool is_nullable, const ffi::CStringMap *metadata, uintptr_t child_list_id);
 	static void VisitVariant(KernelSchemaVisitor *state, uintptr_t sibling_list_id, ffi::KernelStringSlice name,
 	                         bool is_nullable, const ffi::CStringMap *metadata);
 
