@@ -307,6 +307,7 @@ vector<DeltaMultiFileColumnDefinition> DeltaTransaction::GetWriteSchema(ClientCo
 	    kernel_transaction.get(), write_entry.get()->snapshot->extern_engine.get()));
 	auto result =
 	    SchemaVisitor::VisitWriteContextSchema(write_entry.get()->snapshot->extern_engine.get(), write_context);
+	ffi::free_write_context(write_context);
 	return result;
 }
 
