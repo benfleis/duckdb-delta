@@ -306,7 +306,7 @@ vector<DeltaMultiFileColumnDefinition> DeltaTransaction::GetWriteSchema(ClientCo
 	auto write_context = write_entry.get()->snapshot->TryUnpackKernelResult(ffi::get_unpartitioned_write_context(
 	    kernel_transaction.get(), write_entry.get()->snapshot->extern_engine.get()));
 	auto result =
-	    SchemaVisitor::VisitWriteContextSchema(write_entry.get()->snapshot->extern_engine.get(), write_context);
+	    KernelSchemaVisitor::ToColumnDefinitions(write_entry.get()->snapshot->extern_engine.get(), write_context);
 	ffi::free_write_context(write_context);
 	return result;
 }

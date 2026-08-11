@@ -488,8 +488,7 @@ void ScanDataCallBack::VisitCallbackInternal(ffi::NullableCvoid engine_context, 
 
 	// Lookup all columns for potential hits in the constant map
 	if (transform) {
-		ExpressionVisitor visitor;
-		auto parsed_transformation_expression = visitor.VisitKernelExpression(transform);
+		auto parsed_transformation_expression = KernelExpressionVisitor::ToParsedExpression(transform);
 
 		if (!parsed_transformation_expression) {
 			context->error = ErrorData(ExceptionType::IO,
@@ -645,7 +644,7 @@ void DeltaMultiFileList::Bind(vector<LogicalType> &return_types, vector<Identifi
 	vector<DeltaMultiFileColumnDefinition> visited_schema;
 	{
 		auto snapshot_ref = snapshot->GetLockingRef();
-		visited_schema = SchemaVisitor::VisitSnapshotSchema(extern_engine.get(), snapshot_ref.GetPtr());
+		visited_schema = KernelSchemaVisitor::ToColumnDefinitions(extern_engine.get(), snapshot_ref.GetPtr());
 	}
 
 	for (const auto &field : visited_schema) {
@@ -819,7 +818,7 @@ void DeltaMultiFileList::InitializeScan() const {
 		}
 	}
 
-	lazy_loaded_schema = SchemaVisitor::VisitSnapshotGlobalReadSchema(extern_engine.get(), scan.get(), true);
+	lazy_loaded_schema = KernelSchemaVisitor::ToColumnDefinitions(extern_engine.get(), scan.get(), true);
 
 	DeltaMultiFileColumnDefinition::Print(lazy_loaded_schema, "lazy_loaded_schema");
 
